@@ -1,0 +1,35 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+.pytest_cache/
+
+# --- Node.js ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# --- Docker ---
+.dockerignore
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- IDE ---
+.vscode/
+.idea/
+
+# --- Project Specific ---
+# Do not commit real financial data
+backend/data/input/*
+backend/data/output/*
+!backend/data/input/.gitkeep

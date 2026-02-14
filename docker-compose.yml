@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  # Python Backend Service
+  backend:
+    build: ./backend
+    container_name: transformance_api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Sync local changes to container (Hot Reloading)
+      - ./backend/src:/app/src
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  # React Frontend Service
+  frontend:
+    build: ./frontend
+    container_name: transformance_ui
+    ports:
+      - "5173:5173"
+    volumes:
+      # Sync local changes, but ignore node_modules
+      - ./frontend/src:/app/src
+      - /app/node_modules
+    depends_on:
+      - backend
+    environment:
+      # Vite needs this to work correctly in Docker
+      - CHOKIDAR_USEPOLLING=true
