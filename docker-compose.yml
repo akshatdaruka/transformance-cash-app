@@ -32,3 +32,19 @@ services:
     environment:
       # Vite needs this to work correctly in Docker
       - CHOKIDAR_USEPOLLING=true
+  #DB
+  db:
+    image: postgres:15-alpine
+    container_name: transformance_db
+    restart: always
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=transformance
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
