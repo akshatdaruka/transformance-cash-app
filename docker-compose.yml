@@ -10,6 +10,10 @@ services:
     volumes:
       # Sync local changes to container (Hot Reloading)
       - ./backend/src:/app/src
+    env_file:
+      - ./backend/.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - PYTHONUNBUFFERED=1
 

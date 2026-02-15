@@ -18,6 +18,9 @@ function App() {
   const [entries, setEntries] = useState<JournalEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("");
+  
+  // New State for AI Toggle
+  const [useAI, setUseAI] = useState(false);
 
   const processFiles = async () => {
     if (!bankFile || !pdfFile) {
@@ -34,12 +37,13 @@ function App() {
       bankData.append("file", bankFile);
       await axios.post(`${API_BASE}/upload/bank`, bankData);
 
-      setStatus("Parsing Remittance Advice (OCR might take time)...");
-
-      // 2. Upload PDF
+      setStatus(useAI ? "Analyzing PDF with GPT-4o (This takes a moment)..." : "Parsing Remittance Advice...");
+      
+      // 2. Upload PDF (With AI Flag)
       const pdfData = new FormData();
       pdfData.append("file", pdfFile);
-      await axios.post(`${API_BASE}/upload/remittance`, pdfData);
+      // Pass the toggle state to the backend
+      await axios.post(`${API_BASE}/upload/remittance?use_ai=${useAI}`, pdfData);
 
       setStatus("Running Reconciliation Engine...");
 
@@ -68,7 +72,7 @@ function App() {
           {/* Input Card */}
           <div className="md:col-span-1 bg-white p-6 rounded-xl shadow-sm border border-gray-200 h-fit">
             <h2 className="font-semibold text-lg mb-4 text-slate-700">1. Data Input</h2>
-
+            
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-slate-600 mb-1">Bank Statement</label>
@@ -90,15 +94,34 @@ function App() {
                 />
               </div>
 
+              {/* AI Parser Toggle */}
+              <div className="flex items-center bg-indigo-50 p-3 rounded-lg border border-indigo-100 mt-4">
+                <input
+                  type="checkbox"
+                  id="ai-toggle"
+                  checked={useAI}
+                  onChange={(e) => setUseAI(e.target.checked)}
+                  className="w-4 h-4 text-indigo-600 rounded focus:ring-indigo-500 cursor-pointer"
+                />
+                <label htmlFor="ai-toggle" className="ml-2 text-sm font-medium text-indigo-900 cursor-pointer select-none">
+                  Enable AI Parsing (GPT-4o) 
+                  <span className="ml-1 text-[10px] bg-indigo-200 text-indigo-800 px-1.5 py-0.5 rounded-full uppercase font-bold tracking-wide">Beta</span>
+                </label>
+              </div>
+
               <button 
                 onClick={processFiles} 
                 disabled={loading}
-                className="w-full mt-4 bg-slate-900 hover:bg-slate-800 text-white font-medium py-2.5 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                className={`w-full mt-2 font-medium py-2.5 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                  useAI 
+                    ? "bg-indigo-600 hover:bg-indigo-700 text-white shadow-md shadow-indigo-200" 
+                    : "bg-slate-900 hover:bg-slate-800 text-white"
+                }`}
               >
-                {loading ? "Processing..." : "Run Engine"}
+                {loading ? "Processing..." : useAI ? "Run Intelligent Engine" : "Run Standard Engine"}
               </button>
-
-              {status && <p className="text-xs text-center text-slate-500 mt-2">{status}</p>}
+              
+              {status && <p className="text-xs text-center text-slate-500 mt-2 animate-pulse">{status}</p>}
             </div>
           </div>
 
@@ -148,7 +171,7 @@ function App() {
         </div>
       </div>
     </div>
-  )
+  );
 }
 
-export default App
+export default App;

@@ -3,6 +3,12 @@ import os
 # Add the current directory to sys.path so imports work correctly
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+from src.parsers.ai_parser import UniversalAIParser
+from dotenv import load_dotenv
+
+# Load .env file
+load_dotenv()
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import shutil
@@ -56,10 +62,16 @@ async def upload_bank(file: UploadFile = File(...)):
         os.unlink(path)
 
 @app.post("/api/upload/remittance")
-async def upload_remittance(file: UploadFile = File(...)):
+async def upload_remittance(file: UploadFile = File(...), use_ai: bool = False): # <--- Added param
     path = save_upload(file)
     try:
-        parser = BikeTeamParser()
+        if use_ai:
+            print("Using AI Parser...")
+            parser = UniversalAIParser()
+        else:
+            print("Using Standard Parser...")
+            parser = BikeTeamParser()
+
         if not parser.can_parse(path):
             raise HTTPException(400, "PDF format not recognized")
 
@@ -72,9 +84,13 @@ async def upload_remittance(file: UploadFile = File(...)):
             "lines": [l.model_dump() for l in remittance.lines]
         }
     except Exception as e:
+        # Enhanced error logging
+        import traceback
+        traceback.print_exc()
         raise HTTPException(400, str(e))
     finally:
-        os.unlink(path)
+        if os.path.exists(path):
+            os.unlink(path)
 
 @app.post("/api/reconcile")
 async def reconcile():
