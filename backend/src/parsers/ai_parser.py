@@ -1,10 +1,12 @@
 import re
+import ast
 import json
-import ast  # <--- NEW: Safely parses Python dictionaries
 import pdfplumber
 import pytesseract
 from pdf2image import convert_from_path
 from openai import OpenAI
+import base64
+from io import BytesIO
 from src.parsers.base import BasePDFParser
 from src.models import RemittanceAdvice, InvoiceLine
 from decimal import Decimal
@@ -14,13 +16,18 @@ class UniversalAIParser(BasePDFParser):
     def __init__(self):
         print("DEBUG: Initializing Local AI (Ollama)...")
         self.client = OpenAI(
-            base_url="[http://host.docker.internal:11434/v1](http://host.docker.internal:11434/v1)",
+            base_url="http://host.docker.internal:11434/v1",
             api_key="ollama"
         )
         self.model = "llama3.2-vision" 
 
     def can_parse(self, file_path: str) -> bool:
         return True
+
+    def _encode_image(self, image):
+        buffered = BytesIO()
+        image.save(buffered, format="JPEG")
+        return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
     def _extract_text(self, file_path: str) -> str:
         text_content = ""
@@ -32,7 +39,7 @@ class UniversalAIParser(BasePDFParser):
         except: pass
 
         if len(text_content.strip()) < 50:
-            print("DEBUG: No digital text found. Switching to OCR...")
+            print("DEBUG: Low text detected. Running OCR...")
             try:
                 images = convert_from_path(file_path)
                 for img in images:
@@ -43,148 +50,154 @@ class UniversalAIParser(BasePDFParser):
         return text_content
 
     def parse(self, file_path: str) -> RemittanceAdvice:
-        # 1. Get Text
+        # 1. Inputs
         raw_text = self._extract_text(file_path)
         print(f"DEBUG: Extracted {len(raw_text)} chars of text.")
         
-        # 2. Ask Ollama for Regex
-        # We explicitly ask for a Python Dictionary format now, since that's what it wants to give.
+        images = convert_from_path(file_path, first_page=1, last_page=1)
+        base64_image = self._encode_image(images[0])
+
+        # 2. PROMPT (Updated to capture BOTH amount columns)
         prompt = f"""
-        You are a Python Regex Expert.
-        Here is the text from a German Invoice:
-        '''
-        {raw_text[:3000]} 
-        '''
+        You are a Data Extraction API. Your job is to extract data from German Invoices into a Python Dictionary.
+
+        ### EXAMPLE INPUT:
+        "Bike Team GmbH. Invoice #123. Date: 12.12.2023. Bruttobetrag: 1.500,00. Zahlbetrag: 1.470,00"
+
+        ### EXAMPLE OUTPUT:
+        {{
+            'sender_name': 'Bike Team GmbH',
+            'total_amount': '1.470,00',
+            'lines': [
+                 {{ 'internal_ref': '123', 'invoice_number': '123', 'amount_na': '1.500,00', 'amount': '1.470,00' }}
+            ]
+        }}
+
+        ### YOUR TASK:
+        Extract data from the text below.
         
-        TASK: Write Python Regex patterns to extract data.
-        1. "sender_pattern": Capture the Sender Name.
-        2. "total_amount_pattern": Capture the Total (Gesamtsumme).
-        3. "line_pattern": Capture table rows with named groups: (?P<invoice_no>...), (?P<date>...), (?P<amount>...).
+        INPUT TEXT:
+        '''
+        {raw_text}
+        '''
+
+        GUIDELINES:
+        1. **sender_name**: Look for the company name at the top left.
+        2. **total_amount**: Look for "Gesamtsumme" or "Zahlbetrag" (The final total).
+        3. **lines**: Extract the table rows.
+           - "Ihre Belegnr" -> 'internal_ref'
+           - "Referenz" -> 'invoice_number'
+           - "Bruttobetrag" (2nd Last Column) -> 'amount_na'
+           - "Zahlbetrag" (LAST Column) -> 'amount'
 
         OUTPUT:
-        Return ONLY a Python Dictionary. Do not use Markdown.
-        {{
-            'sender_pattern': r'Start_Marker\\s+(?P<sender_name>.*)\\s+End_Marker',
-            'total_amount_pattern': r'Gesamtsumme\\s+(?P<amount>[\\d\\.,]+)',
-            'line_pattern': r'(?P<invoice_no>\\d+)\\s+(?P<date>\\d{{2}}\\.\\d{{2}}\\.\\d{{4}})\\s+(?P<amount>[\\d\\.,]+)'
-        }}
+        Return ONLY the Python dictionary. Start with {{ and end with }}.
         """
 
-        print("DEBUG: Asking Ollama for Regex...")
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-        )
-
-        regex_json_str = response.choices[0].message.content.strip()
-        print(f"DEBUG: LLM Response: {regex_json_str[:100]}...")
-        
-        # 3. Robust Parsing (The Fix)
-        regex_config = self._clean_and_parse_json(regex_json_str)
-        
-        # 4. Execute Regex
-        return self._apply_regex(raw_text, regex_config)
-
-    def _clean_and_parse_json(self, raw_str):
-        """
-        Parses the AI output even if it's messy or uses single quotes.
-        """
+        print("DEBUG: Asking Ollama for Dictionary...")
         try:
-            # 1. Strip Markdown (```python, ```json, ```)
-            clean_str = re.sub(r'```[a-zA-Z]*', '', raw_str).replace('```', '').strip()
-            
-            # 2. Find the Dictionary part { ... }
-            start = clean_str.find('{')
-            end = clean_str.rfind('}')
-            
-            if start != -1 and end != -1:
-                candidate = clean_str[start:end+1]
-                
-                # A. Try Standard JSON (Double Quotes)
-                try:
-                    return json.loads(candidate)
-                except json.JSONDecodeError:
-                    # B. Try Python Eval (Single Quotes / Raw Strings)
-                    # This handles { 'key': r'\d+' } which JSON fails on.
-                    try:
-                        return ast.literal_eval(candidate)
-                    except:
-                        print(f"⚠️ AST Eval failed on: {candidate[:50]}...")
-            
-            return {} # Fallback
-            
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ]}
+                ],
+                temperature=0.0, 
+            )
+            llm_response = response.choices[0].message.content.strip()
+            print(f"DEBUG: LLM Response: {llm_response[:]}...")
         except Exception as e:
-            print(f"❌ Failed to parse Regex: {e}")
-            # Fallback Pattern (Bike Team Specific)
-            return {
-                "sender_pattern": r"Bike Team GmbH", 
-                "total_amount_pattern": r"Gesamtsumme\s+([\d\.,]+)",
-                "line_pattern": r"(?P<invoice_no>\d{5,})\s+(?P<date>\d{2}\.\d{2}\.\d{4})\s+(?P<amount>[\d\.,]+)"
-            }
+            raise ValueError(f"AI Connection Error: {str(e)}")
+        
+        # 3. Robust Extraction
+        data = self._extract_dict_from_response(llm_response)
+        
+        # 4. Convert
+        return self._convert_to_model(data)
 
-    def _apply_regex(self, text, patterns) -> RemittanceAdvice:
-        # Defaults
-        sender = "Unknown"
-        total = Decimal("0.00")
+    def _extract_dict_from_response(self, text):
+        try:
+            match = re.search(r"\{[\s\S]*\}", text)
+            if match:
+                clean_json_str = match.group(0)
+                try:
+                    return ast.literal_eval(clean_json_str)
+                except:
+                    try:
+                        return json.loads(clean_json_str)
+                    except:
+                        pass
+            print("❌ Parsing Failed. Raw text was: " + text[:100])
+            return {}
+        except Exception as e:
+            print(f"❌ Error extracting dict: {e}")
+            return {}
+
+    def _convert_to_model(self, data: dict) -> RemittanceAdvice:
+        # 1. Sender
+        sender = str(data.get("sender_name", "Bike Team GmbH"))
+        
+        # 2. Total
+        total = self._clean_german_number(data.get("total_amount", 0))
+
+        # 3. Lines
         lines = []
+        raw_lines = data.get("lines", [])
+        
+        for item in raw_lines:
+            try:
+                # We strictly use 'amount' (Zahlbetrag). 'amount_na' (Bruttobetrag) is ignored.
+                amt = self._clean_german_number(item.get("amount", 0))
+                
+                # If 'amount' is 0/missing, check if 'amount_na' exists as fallback (optional safety)
+                if amt == 0 and item.get("amount_na"):
+                     print(f"⚠️ Warning: Zahlbetrag missing, checking Bruttobetrag...")
+                     # amt = self._clean_german_number(item.get("amount_na")) # Uncomment if you want fallback
 
-        if not patterns: return RemittanceAdvice(sender_name=sender, total_amount=total, lines=[], currency="EUR")
+                d_str = str(item.get("date", ""))
+                d_obj = date.today()
+                
+                for fmt in ["%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y"]:
+                    try:
+                        d_obj = datetime.strptime(d_str, fmt).date()
+                        break
+                    except: pass
 
-        # A. Extract Sender
-        try:
-            p = patterns.get("sender_pattern") or patterns.get("sender_regex")
-            if p:
-                match = re.search(p, text)
-                if match:
-                    if "sender_name" in match.groupdict(): sender = match.group("sender_name")
-                    else: sender = match.group(0)
-        except Exception as e: print(f"Regex Error (Sender): {e}")
-
-        # B. Extract Total
-        try:
-            p = patterns.get("total_amount_pattern") or patterns.get("total_amount_regex")
-            if p:
-                match = re.search(p, text)
-                if match:
-                    val = match.group("amount") if "amount" in match.groupdict() else match.group(1)
-                    total = self._parse_german_number(val)
-        except Exception as e: print(f"Regex Error (Total): {e}")
-
-        # C. Extract Lines
-        try:
-            p = patterns.get("line_pattern") or patterns.get("table_line_regex") or patterns.get("line_regex")
-            if p:
-                for match in re.finditer(p, text):
-                    g = match.groupdict()
-                    
-                    d_obj = date.today()
-                    if "date" in g:
-                        try: d_obj = datetime.strptime(g["date"], "%d.%m.%Y").date()
-                        except: pass
-                    
-                    amt = Decimal("0.00")
-                    if "amount" in g:
-                        amt = self._parse_german_number(g["amount"])
-                    
+                if amt > 0:
                     lines.append(InvoiceLine(
-                        internal_ref=g.get("invoice_no", "UNK"), 
-                        invoice_number=g.get("invoice_no", "UNK"),
+                        internal_ref=str(item.get("internal_ref", "UNK")),
+                        invoice_number=str(item.get("invoice_number", "UNK")),
                         date=d_obj,
                         gross_amount=amt,
                         net_amount=amt
                     ))
-        except Exception as e: print(f"Regex Error (Lines): {e}")
+            except: pass
 
         return RemittanceAdvice(
-            sender_name=sender.strip(),
+            sender_name=sender,
             total_amount=total,
             lines=lines,
             currency="EUR"
         )
 
-    def _parse_german_number(self, val: str) -> Decimal:
-        if not val: return Decimal(0)
-        clean = val.replace('.', '').replace(',', '.')
-        try: return Decimal(clean)
+    def _clean_german_number(self, val) -> Decimal:
+        if isinstance(val, (int, float)): return Decimal(val)
+        val_str = str(val).strip()
+        if not val_str: return Decimal(0)
+        
+        # Remove currency symbols and non-numeric chars (keep , . -)
+        val_str = re.sub(r"[^\d,.-]", "", val_str)
+
+        # German format: 1.250,00 -> 1250.00
+        if ',' in val_str and '.' in val_str:
+            if val_str.rfind(',') > val_str.rfind('.'):
+                val_str = val_str.replace('.', '').replace(',', '.')
+            else:
+                val_str = val_str.replace(',', '')
+        elif ',' in val_str:
+            val_str = val_str.replace(',', '.')
+            
+        try: return Decimal(val_str)
         except: return Decimal(0)
