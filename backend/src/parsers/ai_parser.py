@@ -57,7 +57,7 @@ class UniversalAIParser(BasePDFParser):
         images = convert_from_path(file_path, first_page=1, last_page=1)
         base64_image = self._encode_image(images[0])
 
-        # 2. PROMPT (Updated to capture BOTH amount columns)
+        # 2. PROMPT (Unchanged)
         prompt = f"""
         You are a Data Extraction API. Your job is to extract data from German Invoices into a Python Dictionary.
 
@@ -87,8 +87,8 @@ class UniversalAIParser(BasePDFParser):
         3. **lines**: Extract the table rows.
            - "Ihre Belegnr" -> 'internal_ref'
            - "Referenz" -> 'invoice_number'
-           - "Bruttobetrag" (2nd Last Column) -> 'amount_na'
-           - "Zahlbetrag" (LAST Column) -> 'amount'
+           - "Bruttobetrag" (2nd Last Column) -> 'amount_na' (Capture this but we might ignore it)
+           - "Zahlbetrag" (LAST Column) -> 'amount' (This is the Payment Amount we strictly need)
 
         OUTPUT:
         Return ONLY the Python dictionary. Start with {{ and end with }}.
@@ -118,19 +118,39 @@ class UniversalAIParser(BasePDFParser):
         return self._convert_to_model(data)
 
     def _extract_dict_from_response(self, text):
+        """
+        Extracts a Python dictionary from the LLM response.
+        Prioritizes Markdown code blocks to avoid capturing "reasoning text".
+        """
         try:
+            # STRATEGY 1: Extract content inside ```python ... ``` or ``` ... ``` blocks
+            # re.DOTALL ensures '.' matches newlines
+            code_blocks = re.findall(r"```(?:python)?\s*([\s\S]*?)\s*```", text, re.DOTALL)
+            
+            if code_blocks:
+                # If multiple blocks exist, the Last one is usually the final answer.
+                for block in reversed(code_blocks):
+                    clean_block = block.strip()
+                    # Ensure it looks like a dict
+                    if clean_block.startswith("{") and clean_block.endswith("}"):
+                        try:
+                            return ast.literal_eval(clean_block)
+                        except:
+                            continue # Try the next block (which is the previous one in the list)
+
+            # STRATEGY 2: Fallback - Find the largest outer { ... } 
+            # (Only used if no code blocks were found)
             match = re.search(r"\{[\s\S]*\}", text)
             if match:
-                clean_json_str = match.group(0)
+                candidate = match.group(0)
                 try:
-                    return ast.literal_eval(clean_json_str)
+                    return ast.literal_eval(candidate)
                 except:
-                    try:
-                        return json.loads(clean_json_str)
-                    except:
-                        pass
-            print("❌ Parsing Failed. Raw text was: " + text[:100])
+                    pass
+            
+            print("❌ Parsing Failed. No valid dictionary found.")
             return {}
+
         except Exception as e:
             print(f"❌ Error extracting dict: {e}")
             return {}
@@ -148,14 +168,7 @@ class UniversalAIParser(BasePDFParser):
         
         for item in raw_lines:
             try:
-                # We strictly use 'amount' (Zahlbetrag). 'amount_na' (Bruttobetrag) is ignored.
                 amt = self._clean_german_number(item.get("amount", 0))
-                
-                # If 'amount' is 0/missing, check if 'amount_na' exists as fallback (optional safety)
-                if amt == 0 and item.get("amount_na"):
-                     print(f"⚠️ Warning: Zahlbetrag missing, checking Bruttobetrag...")
-                     # amt = self._clean_german_number(item.get("amount_na")) # Uncomment if you want fallback
-
                 d_str = str(item.get("date", ""))
                 d_obj = date.today()
                 
@@ -175,11 +188,22 @@ class UniversalAIParser(BasePDFParser):
                     ))
             except: pass
 
+        # --- NEW: Math Check (Hallucination Guardrail) ---
+        calculated_sum = sum(line.net_amount for line in lines)
+        is_valid = True
+        
+        # Check if difference is greater than 0.05 (floating point tolerance)
+        if abs(calculated_sum - total) > Decimal("0.05"):
+            is_valid = False
+            print(f"⚠️ Math Mismatch! AI Total: {total}, Calculated Sum: {calculated_sum}")
+
         return RemittanceAdvice(
             sender_name=sender,
             total_amount=total,
             lines=lines,
-            currency="EUR"
+            currency="EUR",
+            calculated_total=calculated_sum, # Send back so UI can show it
+            is_math_valid=False
         )
 
     def _clean_german_number(self, val) -> Decimal:
@@ -187,10 +211,8 @@ class UniversalAIParser(BasePDFParser):
         val_str = str(val).strip()
         if not val_str: return Decimal(0)
         
-        # Remove currency symbols and non-numeric chars (keep , . -)
         val_str = re.sub(r"[^\d,.-]", "", val_str)
 
-        # German format: 1.250,00 -> 1250.00
         if ',' in val_str and '.' in val_str:
             if val_str.rfind(',') > val_str.rfind('.'):
                 val_str = val_str.replace('.', '').replace(',', '.')

@@ -10,6 +10,14 @@ interface JournalEntry {
   item_text: string;
 }
 
+// New Interface for the AI Response
+interface RemittanceAdvice {
+  total_amount: number;
+  lines: any[];
+  is_math_valid?: boolean;
+  calculated_total?: number;
+}
+
 const API_BASE = "http://127.0.0.1:8000/api";
 
 function App() {
@@ -19,8 +27,9 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("");
   
-  // New State for AI Toggle
+  // New State for AI Toggle & Validation Data
   const [useAI, setUseAI] = useState(false);
+  const [remittanceData, setRemittanceData] = useState<RemittanceAdvice | null>(null);
 
   const processFiles = async () => {
     if (!bankFile || !pdfFile) {
@@ -30,6 +39,9 @@ function App() {
 
     setLoading(true);
     setStatus("Uploading Bank Statement...");
+    // Reset previous data
+    setEntries([]);
+    setRemittanceData(null);
 
     try {
       // 1. Upload Bank
@@ -42,8 +54,10 @@ function App() {
       // 2. Upload PDF (With AI Flag)
       const pdfData = new FormData();
       pdfData.append("file", pdfFile);
-      // Pass the toggle state to the backend
-      await axios.post(`${API_BASE}/upload/remittance?use_ai=${useAI}`, pdfData);
+      
+      // Capture the response to check for validation errors
+      const pdfResponse = await axios.post(`${API_BASE}/upload/remittance?use_ai=${useAI}`, pdfData);
+      setRemittanceData(pdfResponse.data);
 
       setStatus("Running Reconciliation Engine...");
 
@@ -135,6 +149,25 @@ function App() {
                  </span>
               )}
             </div>
+
+            {/* AI Hallucination Warning Banner */}
+            {remittanceData && remittanceData.is_math_valid === false && (
+                <div className="mb-6 bg-amber-50 border-l-4 border-amber-500 p-4 rounded-r shadow-sm animate-fade-in">
+                    <div className="flex">
+                        <div className="flex-shrink-0">
+                            <span className="text-xl">⚠️</span>
+                        </div>
+                        <div className="ml-3">
+                            <h3 className="text-sm font-medium text-amber-800">
+                                Potential AI Error Detected
+                            </h3>
+                            <div className="mt-1 text-sm text-amber-700">
+                                The document total <strong>(€{remittanceData.total_amount.toLocaleString('de-DE', { minimumFractionDigits: 2 })})</strong> does not match the sum of the extracted lines <strong>(€{remittanceData.calculated_total?.toLocaleString('de-DE', { minimumFractionDigits: 2 })})</strong>.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {entries.length === 0 ? (
               <div className="h-64 flex flex-col items-center justify-center text-slate-400 border-2 border-dashed border-slate-100 rounded-lg">

@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from datetime import date
-from typing import List
+from typing import List, Optional
 from decimal import Decimal
 
 class BankTransaction(BaseModel):
@@ -25,6 +25,9 @@ class RemittanceAdvice(BaseModel):
     total_amount: Decimal
     lines: List[InvoiceLine]
     currency: str
+    # NEW: Validation Fields
+    calculated_total: Decimal = Decimal("0.00")
+    is_math_valid: bool = True
 
 class JournalEntry(BaseModel):
     """Represents the final output row"""

@@ -81,7 +81,9 @@ async def upload_remittance(file: UploadFile = File(...), use_ai: bool = False):
         return {
             "message": "Success", 
             "total": remittance.total_amount,
-            "lines": [l.model_dump() for l in remittance.lines]
+            "lines": [l.model_dump() for l in remittance.lines],
+            "is_math_valid": remittance.is_math_valid,
+            "calculated_total": remittance.calculated_total
         }
     except Exception as e:
         # Enhanced error logging
